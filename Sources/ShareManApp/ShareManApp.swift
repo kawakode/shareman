@@ -7,13 +7,14 @@ struct ShareManApp: App {
     @StateObject private var model = AppModel()
 
     var body: some Scene {
-        WindowGroup("ShareMan") {
+        // A single window: ShareMan shows one network, a second window would only mirror the first.
+        Window("ShareMan", id: "main") {
             ContentView()
                 .environmentObject(model)
                 .frame(minWidth: 760, minHeight: 460)
         }
         .commands {
-            CommandGroup(after: .newItem) {
+            CommandGroup(replacing: .newItem) {
                 Button("Scanner le réseau") {
                     Task { await model.scan() }
                 }
