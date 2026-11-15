@@ -66,6 +66,26 @@ public enum MountedShares {
         #endif
     }
 
+    /// Whether a file system of any kind is mounted exactly at `path`.
+    /// Only the kernel's mount table is read: the volume itself is not contacted.
+    public static func isMountPoint(_ path: String) -> Bool {
+        #if os(macOS)
+        var buffer: UnsafeMutablePointer<statfs>?
+        let count = getmntinfo(&buffer, MNT_NOWAIT)
+        guard count > 0, let buffer else { return false }
+        // The kernel reports /private/tmp where people type /tmp, and the
+        // startup disk does not tell /volumes from /Volumes.
+        let wanted = Set([path.lowercased(), "/private" + path.lowercased()])
+        for index in 0..<Int(count) {
+            var entry = buffer[index]
+            if wanted.contains(cString(&entry.f_mntonname).lowercased()) { return true }
+        }
+        return false
+        #else
+        return false
+        #endif
+    }
+
     /// Reads a fixed-size C char array (imported by Swift as a tuple).
     private static func cString<T>(_ tuple: inout T) -> String {
         withUnsafeBytes(of: &tuple) { raw in

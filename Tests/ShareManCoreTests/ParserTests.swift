@@ -16,6 +16,38 @@ final class ShowmountParserTests: XCTestCase {
         XCTAssertEqual(exports[2].clients, ["10.0.0.2", "10.0.0.3"])
     }
 
+    /// Real `showmount -e` output: the path is padded to 35 characters, then a space.
+    func testKeepsSpacesInPathsShorterThanTheColumn() {
+        let output = [
+            "Exports list on 10.0.0.40:",
+            "/POOL1/subvol-3001-disk-0           10.0.0.0/24",
+            "/volume1/Mes films                  10.0.0.0/24 10.0.1.0/24",
+            "/mnt/d5                             *",
+            "/volume1/Photos de famille          Everyone",
+        ].joined(separator: "\n")
+        let exports = ShowmountParser.parse(output)
+        XCTAssertEqual(exports.map(\.path), [
+            "/POOL1/subvol-3001-disk-0", "/volume1/Mes films", "/mnt/d5", "/volume1/Photos de famille",
+        ])
+        XCTAssertEqual(exports[1].clients, ["10.0.0.0/24", "10.0.1.0/24"])
+        XCTAssertEqual(exports[2].clients, ["*"])
+        XCTAssertEqual(exports[3].clients, ["Everyone"])
+    }
+
+    func testPathFillingOrOverflowingTheColumn() {
+        let output = [
+            "/srv/exports/path-of-35-characters0 10.0.0.0/24",
+            "/srv/exports/a/much/longer/path/than/the/column 10.0.0.2 10.0.0.3",
+        ].joined(separator: "\n")
+        let exports = ShowmountParser.parse(output)
+        XCTAssertEqual(exports.map(\.path), [
+            "/srv/exports/path-of-35-characters0",
+            "/srv/exports/a/much/longer/path/than/the/column",
+        ])
+        XCTAssertEqual(exports[0].clients, ["10.0.0.0/24"])
+        XCTAssertEqual(exports[1].clients, ["10.0.0.2", "10.0.0.3"])
+    }
+
     func testEmptyListGivesNoExports() {
         XCTAssertTrue(ShowmountParser.parse("Exports list on nas:\n").isEmpty)
     }
@@ -49,6 +81,44 @@ final class SmbutilParserTests: XCTestCase {
     }
 }
 
+final class SmbutilColumnTests: XCTestCase {
+    private func row(_ name: String, _ type: String, _ comment: String = "") -> String {
+        // Same layout as smbutil: "%-48s%-8s%s".
+        let paddedName = name.padding(toLength: max(48, name.count), withPad: " ", startingAt: 0)
+        let paddedType = type.padding(toLength: 8, withPad: " ", startingAt: 0)
+        return paddedName + paddedType + comment
+    }
+
+    func testNameContainingATypeWordStaysWhole() {
+        let output = [
+            row("Share", "Type", "Comments"),
+            "-------------------------------",
+            row("USB Disk 1", "Disk", "Disque externe"),
+            row("Old Printer Drivers", "Disk"),
+            row("Imprimante du bureau", "Printer", "Disk tray 2"),
+            "",
+            "3 shares listed",
+        ].joined(separator: "\n")
+        let shares = SmbutilParser.parse(output)
+        XCTAssertEqual(shares.map(\.name), ["USB Disk 1", "Old Printer Drivers", "Imprimante du bureau"])
+        XCTAssertEqual(shares.map(\.type), ["Disk", "Disk", "Printer"])
+        XCTAssertEqual(shares[0].comment, "Disque externe")
+        XCTAssertNil(shares[1].comment)
+        XCTAssertEqual(shares[2].comment, "Disk tray 2")
+    }
+
+    func testAccentedNameIsCutAtTheRightColumn() {
+        // "é" is two bytes: the type column moves when counted in bytes.
+        let byteAligned = "Vidéos" + String(repeating: " ", count: 48 - "Vidéos".utf8.count) + "Disk    Films"
+        let characterAligned = "Vidéos" + String(repeating: " ", count: 48 - "Vidéos".count) + "Disk    Films"
+        for line in [byteAligned, characterAligned] {
+            let shares = SmbutilParser.parse("-------\n" + line)
+            XCTAssertEqual(shares.map(\.name), ["Vidéos"])
+            XCTAssertEqual(shares.first?.comment, "Films")
+        }
+    }
+}
+
 final class ShareURLTests: XCTestCase {
     func testBuildsNFSURLWithEncodedPath() {
         let url = ShareURL.make(kind: .nfs, host: "nas.local", path: "/volume1/Mes films")
@@ -78,6 +148,11 @@ final class ShareURLTests: XCTestCase {
 
     func testExplicitUserOverridesEmbeddedUser() throws {
         XCTAssertEqual(try ShareURL.parse("smb://alice@nas/Public", user: "bob").absoluteString, "smb://bob@nas/Public")
+    }
+
+    func testAcceptsTheRootExportOfAnNFSServer() throws {
+        XCTAssertEqual(try ShareURL.parse("nfs://nas/").absoluteString, "nfs://nas/")
+        XCTAssertEqual(try ShareURL.parse("nas:/").absoluteString, "nfs://nas/")
     }
 
     func testRejectsInvalidTargets() {
@@ -143,6 +218,30 @@ final class MountedShareTests: XCTestCase {
     }
 }
 
+final class MountPointTests: XCTestCase {
+    func testRootIsAMountPointAndAPlainFolderIsNot() throws {
+        #if os(macOS)
+        XCTAssertTrue(MountedShares.isMountPoint("/"))
+        XCTAssertFalse(MountedShares.isMountPoint("/Volumes/shareman-does-not-exist"))
+        XCTAssertFalse(MountedShares.isMountPoint(NSTemporaryDirectory()))
+        #endif
+    }
+
+    func testUnmountingSomethingNotMountedSaysSo() async {
+        #if os(macOS)
+        do {
+            try await ShareMounter.unmount(path: "/Volumes/shareman-does-not-exist")
+            XCTFail("unmount should have failed")
+        } catch {
+            XCTAssertEqual(
+                error as? ShareManError,
+                .unmountFailed(path: "/Volumes/shareman-does-not-exist", message: "rien n'est monté à cet endroit.")
+            )
+        }
+        #endif
+    }
+}
+
 final class PortScannerTests: XCTestCase {
     func testClosedLocalPortIsNotReported() {
         // Port 1 on loopback is closed on any normal machine: the connection is refused at once.
@@ -199,6 +298,26 @@ final class ScanOptionsTests: XCTestCase {
         options.deepNFS = true
         XCTAssertEqual(NetworkScanner.subnetsToScan(options).map(\.description), ["192.168.138.0/23", "10.1.0.0/20"])
         XCTAssertGreaterThanOrEqual(options.effectiveTimeout, 1.5)
+    }
+
+    func testDeepScanWithoutNFSChangesNothing() {
+        var options = ScanOptions()
+        options.protocols = [.smb]
+        options.deepNFS = true
+        options.subnets = [IPv4Subnet(cidr: "10.1.2.3/16")!]
+        XCTAssertEqual(NetworkScanner.subnetsToScan(options).map(\.description), ["10.1.0.0/22"])
+        XCTAssertEqual(options.effectiveTimeout, options.connectTimeout)
+    }
+
+    func testWarnsWhenASubnetIsNarrowed() {
+        var options = ScanOptions()
+        options.subnets = [IPv4Subnet(cidr: "10.0.0.0/24")!]
+        XCTAssertTrue(NetworkScanner.narrowingWarnings(options).isEmpty)
+        options.subnets = [IPv4Subnet(cidr: "10.0.0.0/16")!, IPv4Subnet(cidr: "192.168.1.0/24")!]
+        let warnings = NetworkScanner.narrowingWarnings(options)
+        XCTAssertEqual(warnings.count, 1)
+        XCTAssertTrue(warnings[0].contains("10.0.0.0/16"))
+        XCTAssertTrue(warnings[0].contains("10.0.0.0/22"))
     }
 
     func testBlockedLocallyDetection() {
