@@ -90,7 +90,12 @@ public enum ShareMounter {
     /// Unmounts a volume previously mounted (by ShareMan or Finder).
     public static func unmount(path: String, force: Bool = false) async throws {
         #if os(macOS)
-        let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL
+        // Checked against the kernel's table, without touching the volume:
+        // macOS's own error for this case is vague and not in French.
+        guard MountedShares.isMountPoint(url.path) else {
+            throw ShareManError.unmountFailed(path: url.path, message: "rien n'est monté à cet endroit.")
+        }
         if force {
             let result = try await CommandRunner.run("/usr/sbin/diskutil", ["unmount", "force", url.path], timeout: 30)
             guard result.status == 0 else {
@@ -112,23 +117,31 @@ public enum ShareMounter {
         #endif
     }
 
-    /// Human-readable explanation of a NetFS / errno status code.
+    /// Status returned when the user dismisses macOS's own dialog (`userCanceledErr`).
+    public static let userCancelledStatus: Int32 = -128
+    /// Status returned when the share is already mounted (`EEXIST`).
+    public static let alreadyMountedStatus: Int32 = 17
+
+    /// Human-readable explanation of a NetFS / errno status code. The text
+    /// suits both the app and the command-line tool: it names no command.
     public static func describe(status: Int32, url: URL) -> String {
         let isNFS = url.scheme?.lowercased() == "nfs"
         let target = url.absoluteString
         switch status {
         case 1, 13: // EPERM, EACCES
             if isNFS {
-                return "Accès refusé par le serveur NFS pour \(target). Vérifie que l'export autorise l'adresse IP de ce Mac. "
+                // A Linux server answers "access denied" for a path it does not export, too.
+                return "Accès refusé par le serveur NFS pour \(target). Vérifie que ce chemin est bien exporté "
+                    + "et que l'export autorise l'adresse IP de ce Mac. "
                     + "Sur un serveur Linux, ajoute l'option « insecure » à l'export : macOS se connecte depuis un port non privilégié."
             }
             return "Accès refusé pour \(target) : identifiants ou droits insuffisants."
         case 2: // ENOENT
             return isNFS
-                ? "L'export n'existe pas sur le serveur (\(target)). Liste les exports avec « shareman shares <hôte> »."
+                ? "L'export n'existe pas sur le serveur (\(target))."
                 : "Le partage n'existe pas sur le serveur (\(target))."
         case 17: // EEXIST
-            return "\(target) est déjà monté. Vois « shareman mounts »."
+            return "\(target) est déjà monté."
         case 60: // ETIMEDOUT
             return "Le serveur ne répond pas (\(target))."
         case 61: // ECONNREFUSED
@@ -145,8 +158,7 @@ public enum ShareMounter {
             if status > 0, let message = strerror(status) {
                 return "Échec du montage de \(target) : \(String(cString: message)) (code \(status))."
             }
-            let hint = isNFS ? "" : " Si le serveur demande un compte, relance avec --user (et --ask-password)."
-            return "Échec du montage de \(target) (code NetFS \(status))." + hint
+            return "Échec du montage de \(target) (code NetFS \(status))."
         }
     }
 }

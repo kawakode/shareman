@@ -86,8 +86,10 @@ public enum ShareURL {
         if authority.hasPrefix("["), authority.hasSuffix("]") {
             authority = String(authority.dropFirst().dropLast())
         }
+        // An SMB URL needs a share name. "nfs://host/" is the server's root
+        // export, which is what an NFSv4 server usually offers.
         let pathIsEmpty = path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).isEmpty
-        guard !authority.isEmpty, !pathIsEmpty,
+        guard !authority.isEmpty, kind == .nfs || !pathIsEmpty,
               let url = make(kind: kind, host: authority, path: path, user: effectiveUser)
         else {
             throw ShareManError.invalidTarget(raw)

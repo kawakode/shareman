@@ -7,7 +7,7 @@ struct ShareManCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "shareman",
         abstract: "Découvre les partages NFS et SMB du réseau local et les monte sur macOS.",
-        version: "0.1.0",
+        version: ShareManVersion.current,
         subcommands: [Scan.self, Shares.self, Mount.self, Mounts.self, Unmount.self, Favorite.self],
         defaultSubcommand: Scan.self
     )
@@ -78,6 +78,15 @@ struct Scan: AsyncParsableCommand {
     @Flag(help: "Sortie JSON.")
     var json = false
 
+    func validate() throws {
+        guard timeout > 0 else {
+            throw ValidationError("--timeout doit être supérieur à 0.")
+        }
+        guard bonjourTime >= 0 else {
+            throw ValidationError("--bonjour-time ne peut pas être négatif.")
+        }
+    }
+
     func run() async throws {
         var options = ScanOptions()
         options.protocols = protocolOptions.protocols
@@ -110,10 +119,9 @@ struct Scan: AsyncParsableCommand {
 
         let result = await NetworkScanner.run(options: options)
         let servers = result.servers
-        if !json {
-            result.warnings.forEach { printError("Attention : \($0)") }
-            if verbose { printError(result.diagnostics) }
-        }
+        // Warnings go to stderr, so they never spoil the JSON on stdout.
+        result.warnings.forEach { printError("Attention : \($0)") }
+        if verbose { printError(result.diagnostics) }
         let protocols = options.protocols
         let listShares = !noShares
         let report = await withTaskGroup(of: ServerReport.self) { group in
@@ -225,7 +233,13 @@ struct Shares: AsyncParsableCommand {
     func run() async throws {
         var all: [NetworkShare] = []
         var failures = 0
-        for kind in protocolOptions.protocols.sorted() {
+        var kinds = protocolOptions.protocols.sorted()
+        // Without --nfs or --smb, only ask for what the server offers: an
+        // NFS-only server is not reported as an SMB failure.
+        if kinds.count > 1, let answering = await NetworkScanner.protocols(answeringOn: host) {
+            kinds = kinds.filter { answering.contains($0) }
+        }
+        for kind in kinds {
             do {
                 switch kind {
                 case .nfs:
@@ -309,7 +323,28 @@ struct Mount: AsyncParsableCommand {
             }
         } catch {
             printError(error.localizedDescription)
+            if case let ShareManError.mountFailed(code, _) = error, let advice = hint(forStatus: code, url: url) {
+                printError(advice)
+            }
             throw ExitCode.failure
+        }
+    }
+
+    /// What to try next on the command line, for the failures that have an obvious next step.
+    private func hint(forStatus status: Int32, url: URL) -> String? {
+        let isNFS = url.scheme?.lowercased() == "nfs"
+        let host = url.host ?? "<hôte>"
+        switch status {
+        case 2 where isNFS: // ENOENT
+            return "Liste les exports avec « shareman shares \(host) --nfs »."
+        case ShareMounter.alreadyMountedStatus:
+            return "Vois « shareman mounts »."
+        case 80 where !isNFS && user == nil && !guest: // EAUTH
+            return "Si le serveur demande un compte, relance avec --user (et --ask-password), ou avec --guest."
+        case let code where code < 0 && code != ShareMounter.userCancelledStatus && !isNFS && user == nil:
+            return "Si le serveur demande un compte, relance avec --user (et --ask-password)."
+        default:
+            return nil
         }
     }
 }

@@ -27,9 +27,10 @@ public struct ScanOptions: Sendable {
 
     public init() {}
 
-    var effectiveMaxPrefix: Int { maxPrefix ?? (deepNFS ? 20 : 22) }
-    var effectiveTimeout: TimeInterval { deepNFS ? max(connectTimeout, 1.5) : connectTimeout }
+    /// The deep scan is about NFS only: asking for it without NFS changes nothing.
     var runsDeepNFS: Bool { deepNFS && protocols.contains(.nfs) }
+    var effectiveMaxPrefix: Int { maxPrefix ?? (runsDeepNFS ? 20 : 22) }
+    var effectiveTimeout: TimeInterval { runsDeepNFS ? max(connectTimeout, 1.5) : connectTimeout }
 }
 
 public struct ScanResult: Sendable {
@@ -40,6 +41,9 @@ public struct ScanResult: Sendable {
     /// TCP probes sent, and how many the Mac refused before they left (by errno).
     public var probeCount = 0
     public var immediateFailures: [Int32: Int] = [:]
+    /// True when the Mac itself refused the probes, which is what macOS's
+    /// "Local Network" privacy setting does. `warnings` explains it in words.
+    public var blockedByLocalNetwork = false
 
     /// One-line summary of the TCP probes, for troubleshooting.
     public var diagnostics: String {
@@ -72,8 +76,17 @@ public enum NetworkScanner {
             : PortScanOutcome()
 
         let outcome = await portResults
-        let servers = merge(await bonjourResults + outcome.servers)
+        var servers = merge(await bonjourResults + outcome.servers)
+        if options.subnets == nil {
+            // An automatic scan is about the other machines: this Mac's own
+            // file sharing is not something to mount on itself.
+            let own = Set(LocalNetwork.activeIPv4Subnets().map { IPv4Subnet.format($0.address) })
+            servers.removeAll { own.contains($0.address) }
+        }
         var warnings = outcome.warnings
+        if options.usePortScan {
+            warnings += narrowingWarnings(options)
+        }
         if options.usePortScan && subnets.isEmpty {
             warnings.append("Aucune interface réseau IPv4 active : rien à scanner.")
         }
@@ -82,7 +95,8 @@ public enum NetworkScanner {
             scannedSubnets: subnets,
             warnings: warnings,
             probeCount: outcome.probeCount,
-            immediateFailures: outcome.immediateFailures
+            immediateFailures: outcome.immediateFailures,
+            blockedByLocalNetwork: outcome.blockedLocally
         )
     }
 
@@ -94,6 +108,29 @@ public enum NetworkScanner {
         return subnets
             .map { $0.narrowed(to: options.effectiveMaxPrefix) }
             .filter { seen.insert($0.description).inserted }
+    }
+
+    /// One warning per network too large to be probed entirely: servers
+    /// outside the probed block would otherwise be missed without a word.
+    static func narrowingWarnings(_ options: ScanOptions) -> [String] {
+        let limit = options.effectiveMaxPrefix
+        var seen = Set<String>()
+        return (options.subnets ?? LocalNetwork.activeIPv4Subnets())
+            .filter { $0.prefixLength < limit && seen.insert($0.description).inserted }
+            .map { subnet in
+                "Le réseau \(subnet) est trop grand pour être parcouru en entier : seul "
+                    + "\(subnet.narrowed(to: limit)) est scanné. Indique un sous-réseau plus précis pour chercher ailleurs."
+            }
+    }
+
+    /// Protocols whose port answers on `host`, for a server added by hand.
+    /// Returns nil when `host` is not an IPv4 address or nothing answered, in
+    /// which case the caller cannot tell and should try every protocol.
+    public static func protocols(answeringOn host: String, timeout: TimeInterval = 1) async -> Set<ShareProtocol>? {
+        guard let address = IPv4Subnet.parseAddress(host) else { return nil }
+        let result = await PortScanner.scan(hosts: [address], ports: ShareProtocol.allCases.map(\.port), timeout: timeout)
+        let found = Set(ShareProtocol.allCases.filter { result.open[address]?.contains($0.port) == true })
+        return found.isEmpty ? nil : found
     }
 
     static func bonjourScan(protocols: [ShareProtocol], duration: TimeInterval) async -> [DiscoveredServer] {
@@ -116,6 +153,7 @@ public enum NetworkScanner {
         var warnings: [String] = []
         var probeCount = 0
         var immediateFailures: [Int32: Int] = [:]
+        var blockedLocally = false
     }
 
     static func portScan(
@@ -179,7 +217,8 @@ public enum NetworkScanner {
         }
 
         var warnings: [String] = []
-        if tcp.looksBlockedLocally && nfsByRPC.isEmpty {
+        let blockedLocally = tcp.looksBlockedLocally && nfsByRPC.isEmpty
+        if blockedLocally {
             warnings.append(
                 "macOS a refusé presque toutes les connexions avant qu'elles partent sur le réseau. "
                 + "Si tu attendais des serveurs, autorise l'app (ou le Terminal) dans "
@@ -190,7 +229,8 @@ public enum NetworkScanner {
             servers: servers,
             warnings: warnings,
             probeCount: tcp.probeCount,
-            immediateFailures: tcp.immediateFailures
+            immediateFailures: tcp.immediateFailures,
+            blockedLocally: blockedLocally
         )
     }
 
