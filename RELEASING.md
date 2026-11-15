@@ -25,8 +25,8 @@ Le tag doit avoir la forme `vX.Y.Z`. Le workflow :
 
 Liens stables, toujours vers la dernière version :
 
-- page : https://github.com/kawakode/shareBuddy/releases/latest
-- DMG direct : https://github.com/kawakode/shareBuddy/releases/latest/download/ShareMan.dmg
+- page : https://github.com/kawakode/shareman/releases/latest
+- DMG direct : https://github.com/kawakode/shareman/releases/latest/download/ShareMan.dmg
 
 Relancer le workflow sur un tag existant remplace simplement les fichiers de
 la release.

@@ -19,7 +19,7 @@
         <a href="./#interface"><span lang="fr">L’application</span><span lang="en">The app</span></a>
         <a href="./#installation">Installation</a>
         <a href="guide.html">Guide</a>
-        <a href="https://github.com/kawakode/shareBuddy">GitHub</a>
+        <a href="https://github.com/kawakode/shareman">GitHub</a>
         <span class="lang-switch"><a href="#" data-set-lang="fr" hreflang="fr">FR</a><a href="#" data-set-lang="en" hreflang="en">EN</a></span>
       </nav>
     </header>
@@ -45,14 +45,14 @@
           <h2>Installation</h2>
 
           <h3 lang="fr">L’application</h3><h3 lang="en">The app</h3>
-          <p lang="fr">Téléchargez le <code>.dmg</code> de la <a href="https://github.com/kawakode/shareBuddy/releases/latest">dernière version</a>, ouvrez-le et glissez ShareMan dans le dossier Applications. Il faut macOS 13 Ventura ou plus récent.</p>
-          <p lang="en">Download the <code>.dmg</code> from the <a href="https://github.com/kawakode/shareBuddy/releases/latest">latest release</a>, open it and drag ShareMan into the Applications folder. Requires macOS 13 Ventura or later.</p>
+          <p lang="fr">Téléchargez le <code>.dmg</code> de la <a href="https://github.com/kawakode/shareman/releases/latest">dernière version</a>, ouvrez-le et glissez ShareMan dans le dossier Applications. Il faut macOS 13 Ventura ou plus récent.</p>
+          <p lang="en">Download the <code>.dmg</code> from the <a href="https://github.com/kawakode/shareman/releases/latest">latest release</a>, open it and drag ShareMan into the Applications folder. Requires macOS 13 Ventura or later.</p>
 
           <h3 lang="fr">Depuis les sources</h3><h3 lang="en">From source</h3>
           <p lang="fr">Il faut Xcode, ou les Command Line Tools (<code>xcode-select --install</code>).</p>
           <p lang="en">You need Xcode, or the Command Line Tools (<code>xcode-select --install</code>).</p>
-<pre>git clone https://github.com/kawakode/shareBuddy.git
-cd shareBuddy
+<pre>git clone https://github.com/kawakode/shareman.git
+cd shareman
 
 scripts/build-app.sh --install                <span class="c"># ShareMan.app → /Applications</span>
 swift build -c release                        <span class="c"># shareman (CLI)</span>
@@ -62,8 +62,8 @@ cp .build/release/shareman /usr/local/bin/</pre>
         <!-- CLI -->
         <section id="ligne-de-commande">
           <h2 lang="fr">Ligne de commande</h2><h2 lang="en">Command line</h2>
-          <p lang="fr">L’outil <code>shareman</code> fait tout ce que fait l’application, depuis le Terminal. Téléchargez <code class="nw">shareman-macos.zip</code> depuis la <a href="https://github.com/kawakode/shareBuddy/releases/latest">dernière version</a> (ou compilez-le, voir plus haut), puis&nbsp;:</p>
-          <p lang="en">The <code>shareman</code> tool does everything the app does, from the Terminal. Download <code class="nw">shareman-macos.zip</code> from the <a href="https://github.com/kawakode/shareBuddy/releases/latest">latest release</a> (or build it, see above), then:</p>
+          <p lang="fr">L’outil <code>shareman</code> fait tout ce que fait l’application, depuis le Terminal. Téléchargez <code class="nw">shareman-macos.zip</code> depuis la <a href="https://github.com/kawakode/shareman/releases/latest">dernière version</a> (ou compilez-le, voir plus haut), puis&nbsp;:</p>
+          <p lang="en">The <code>shareman</code> tool does everything the app does, from the Terminal. Download <code class="nw">shareman-macos.zip</code> from the <a href="https://github.com/kawakode/shareman/releases/latest">latest release</a> (or build it, see above), then:</p>
 
 <pre>cd ~/Downloads &amp;&amp; unzip shareman-macos.zip
 sudo mv shareman /usr/local/bin/
@@ -177,7 +177,7 @@ shareman favorite remove /Volumes/media</pre>
   </div>
 
   <footer>
-    <p>ShareMan · <a href="https://github.com/kawakode/shareBuddy/releases/latest"><span lang="fr">Télécharger</span><span lang="en">Download</span></a> · <a href="guide.html">Guide</a> · <a href="https://github.com/kawakode/shareBuddy"><span lang="fr">Code source</span><span lang="en">Source code</span></a></p>
+    <p>ShareMan · <a href="https://github.com/kawakode/shareman/releases/latest"><span lang="fr">Télécharger</span><span lang="en">Download</span></a> · <a href="guide.html">Guide</a> · <a href="https://github.com/kawakode/shareman"><span lang="fr">Code source</span><span lang="en">Source code</span></a></p>
     <p class="legal" lang="fr">Mac, macOS et Finder sont des marques d’Apple Inc. ShareMan n’est pas affilié à Apple.</p>
     <p class="legal" lang="en">Mac, macOS and Finder are trademarks of Apple Inc. ShareMan is not affiliated with Apple.</p>
   </footer>

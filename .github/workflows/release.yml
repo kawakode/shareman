@@ -59,6 +59,14 @@ jobs:
             echo "HAS_NOTARY=false" >> "$GITHUB_ENV"
           fi
 
+      # The app takes its version from Info.plist (set by build-app.sh); this
+      # gives the same one to `shareman --version`.
+      - name: Stamp version
+        if: env.IS_RELEASE == 'true'
+        run: |
+          sed -i '' "s/current = \".*\"/current = \"$VERSION\"/" Sources/ShareManCore/Version.swift
+          grep -q "current = \"$VERSION\"" Sources/ShareManCore/Version.swift
+
       - name: Toolchain
         run: |
           xcodebuild -version
@@ -106,6 +114,7 @@ jobs:
           fi
           ditto -c -k build/cli/shareman build/shareman-macos.zip
           lipo -info build/cli/shareman
+          build/cli/shareman --version
 
       - name: Create DMG
         run: |
