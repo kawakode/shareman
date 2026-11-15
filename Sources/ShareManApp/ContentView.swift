@@ -5,6 +5,12 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @State private var manualHost = ""
+    /// The list writes its selection while SwiftUI updates the views. Kept in
+    /// view state and copied to the model afterwards: bound straight to the
+    /// model, every click logged "Publishing changes from within view updates".
+    @State private var selection: String?
+    /// Same reason for the protocol picker of the toolbar.
+    @State private var filterChoice = AppModel.ProtocolFilter.both
 
     var body: some View {
         NavigationSplitView {
@@ -30,7 +36,9 @@ struct ContentView: View {
                 return Alert(
                     title: Text(item.title),
                     message: Text(item.message),
-                    primaryButton: .destructive(Text(actionTitle), action: action),
+                    primaryButton: item.actionIsDestructive
+                        ? .destructive(Text(actionTitle), action: action)
+                        : .default(Text(actionTitle), action: action),
                     secondaryButton: .cancel(Text("Annuler"))
                 )
             }
@@ -40,7 +48,13 @@ struct ContentView: View {
         .task {
             if !model.hasScanned { await model.scan() }
         }
-        .onAppear { model.refreshMounts() }
+        .onAppear {
+            filterChoice = model.filter
+            model.refreshMounts()
+        }
+        .onChange(of: filterChoice) { newValue in
+            if model.filter != newValue { model.filter = newValue }
+        }
         // Shares mounted, unmounted or starred in Finder show up here without a new scan.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             model.refreshMounts()
@@ -57,7 +71,7 @@ struct ContentView: View {
 
     private var sidebar: some View {
         VStack(spacing: 0) {
-            List(selection: $model.selectedServerID) {
+            List(selection: $selection) {
                 Section("Serveurs") {
                     if model.visibleServers.isEmpty {
                         Text(emptyServersText)
@@ -84,6 +98,16 @@ struct ContentView: View {
                 }
             }
             .listStyle(.sidebar)
+            .onAppear { selection = model.selectedServerID }
+            .onChange(of: selection) { newValue in
+                if model.selectedServerID != newValue { model.selectedServerID = newValue }
+            }
+            .onChange(of: model.selectedServerID) { newValue in
+                if selection != newValue { selection = newValue }
+            }
+            .onDeleteCommand {
+                if let address = model.selectedServerID { model.removeServer(address) }
+            }
 
             Divider()
             HStack(spacing: 6) {
@@ -118,40 +142,113 @@ struct ContentView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItemGroup(placement: .primaryAction) {
-            Picker("Protocoles", selection: $model.filter) {
+        // Separate items, in this order: when the window is narrow macOS hides
+        // the last ones first, and the scan button must not be one of them.
+        ToolbarItem(placement: .primaryAction) {
+            Picker("Protocoles", selection: $filterChoice) {
                 ForEach(AppModel.ProtocolFilter.allCases) { filter in
                     Text(filter.label).tag(filter)
                 }
             }
             .pickerStyle(.segmented)
             .help("Protocoles à rechercher et à afficher")
-
-            Toggle(isOn: $model.deepScan) {
-                Label("Scan approfondi", systemImage: "scope")
-            }
-            .toggleStyle(.button)
-            .disabled(model.filter == .smb)
-            .help("Scan NFS approfondi : sous-réseau entier, délais plus longs, interrogation RPC du port 111. Plus lent.")
-
-            TextField("Sous-réseau (auto)", text: $model.subnetText)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 150)
-                .help("Facultatif. Exemple : 10.0.0.0/24. Plusieurs valeurs séparées par des virgules.")
-                .onSubmit { Task { await model.scan() } }
-
+        }
+        ToolbarItem(placement: .primaryAction) {
             Button {
                 Task { await model.scan() }
             } label: {
-                if model.isScanning {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Label("Scanner", systemImage: "arrow.clockwise")
-                }
+                // Same width in both states: a wider label pushed the options
+                // button out of the toolbar for the length of each scan.
+                Label("Scanner", systemImage: "arrow.clockwise")
+                    .labelStyle(.titleAndIcon)
+                    .opacity(model.isScanning ? 0 : 1)
+                    .overlay {
+                        if model.isScanning { ProgressView().controlSize(.small) }
+                    }
             }
             .disabled(model.isScanning)
-            .help("Chercher les serveurs (⌘R)")
+            .help(model.isScanning ? "Scan en cours…" : "Chercher les serveurs (⌘R)")
         }
+        ToolbarItem(placement: .primaryAction) {
+            ScanOptionsButton()
+        }
+    }
+}
+
+/// Deep scan and subnets: settings changed rarely, kept out of the toolbar so
+/// that the scan button always fits.
+struct ScanOptionsButton: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var isShown = false
+
+    private var summary: String {
+        var active: [String] = []
+        if model.deepScan && model.filter != .smb { active.append("scan approfondi") }
+        let subnets = model.subnetText.trimmingCharacters(in: .whitespaces)
+        if !subnets.isEmpty { active.append("sous-réseau \(subnets)") }
+        return active.isEmpty
+            ? "Options de scan : scan approfondi, sous-réseau"
+            : "Options de scan actives : " + active.joined(separator: ", ")
+    }
+
+    private var hasActiveOption: Bool {
+        (model.deepScan && model.filter != .smb) || !model.subnetText.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    var body: some View {
+        Button {
+            isShown.toggle()
+        } label: {
+            Label("Options de scan", systemImage: "slider.horizontal.3")
+                .overlay(alignment: .topTrailing) {
+                    // A dot tells that a scan option is on without opening the popover.
+                    if hasActiveOption {
+                        Circle()
+                            .fill(Color.accentColor)
+                            .frame(width: 6, height: 6)
+                            .offset(x: 4, y: -3)
+                    }
+                }
+        }
+        .help(summary)
+        .popover(isPresented: $isShown, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("Scan NFS approfondi", isOn: $model.deepScan)
+                    .disabled(model.filter == .smb)
+                Text("Parcourt le sous-réseau entier, attend plus longtemps et interroge le port 111 (RPC). "
+                    + "Plus lent, mais trouve les serveurs NFS qui échappent au scan rapide.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Divider().padding(.vertical, 4)
+
+                Text("Sous-réseau à scanner")
+                TextField("Automatique", text: $model.subnetText)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(scan)
+                Text("Facultatif. Exemple : 10.0.0.0/24. Plusieurs valeurs séparées par des virgules. "
+                    + "Vide, ShareMan scanne les réseaux de ce Mac.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack {
+                    Spacer()
+                    Button("Scanner", action: scan)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(model.isScanning)
+                }
+                .padding(.top, 4)
+            }
+            .padding(16)
+            .frame(width: 320)
+        }
+    }
+
+    private func scan() {
+        isShown = false
+        Task { await model.scan() }
     }
 }
 
@@ -246,14 +343,22 @@ struct FavoriteButton: View {
     var body: some View {
         let isFavorite = model.isFavorite(path)
         let title = isFavorite ? "Retirer des favoris du Finder" : "Ajouter aux favoris du Finder"
-        Button {
-            Task { await model.toggleFavorite(path) }
-        } label: {
-            Label(title, systemImage: isFavorite ? "star.fill" : "star")
-                .labelStyle(.iconOnly)
-                .foregroundStyle(isFavorite ? Color.yellow : Color.secondary)
+        if model.favoriteBusy.contains(path) {
+            // The first time, macOS asks for access to network volumes and
+            // the star waits for the answer.
+            ProgressView()
+                .controlSize(.small)
+                .help("Modification des favoris du Finder…")
+        } else {
+            Button {
+                Task { await model.toggleFavorite(path) }
+            } label: {
+                Label(title, systemImage: isFavorite ? "star.fill" : "star")
+                    .labelStyle(.iconOnly)
+                    .foregroundStyle(isFavorite ? Color.yellow : Color.secondary)
+            }
+            .help(title)
         }
-        .help(title)
     }
 }
 
@@ -315,17 +420,37 @@ struct PlaceholderView: View {
                 Image(systemName: "network")
                     .font(.system(size: 44))
                     .foregroundStyle(.secondary)
-                Text(model.visibleServers.isEmpty ? "Aucun serveur" : "Choisis un serveur")
-                    .font(.title3)
-                Text("Lance un scan pour trouver les partages NFS et SMB du réseau.\nSi un serveur NFS n'apparaît pas, active le scan approfondi ou ajoute-le à la main.")
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
-                Button("Scanner") { Task { await model.scan() } }
-                    .keyboardShortcut(.defaultAction)
+                if !model.visibleServers.isEmpty {
+                    Text("Choisis un serveur")
+                        .font(.title3)
+                    Text("Ses partages s'affichent ici.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(model.hasScanned ? "Aucun serveur trouvé" : "Aucun serveur")
+                        .font(.title3)
+                    Text(emptyAdvice)
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.secondary)
+                    Button(model.hasScanned ? "Scanner à nouveau" : "Scanner") { Task { await model.scan() } }
+                        .keyboardShortcut(.defaultAction)
+                }
             }
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// What to try next, once a scan has come back empty.
+    private var emptyAdvice: String {
+        guard model.hasScanned else {
+            return "Lance un scan pour trouver les partages NFS et SMB du réseau."
+        }
+        let byHand = "ajoute-le à la main par son adresse, en bas à gauche."
+        if model.filter == .smb {
+            return "Le scan n'a vu aucun serveur SMB.\nSi le tien n'apparaît pas, " + byHand
+        }
+        return "Le scan n'a vu aucun serveur \(model.filter.label).\nSi un serveur NFS n'apparaît pas, "
+            + "active le scan approfondi dans les options de scan ou " + byHand
     }
 }
 
@@ -364,9 +489,17 @@ struct ServerDetailView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(server.displayName)
-                .font(.title2.weight(.semibold))
-                .textSelection(.enabled)
+            HStack(alignment: .firstTextBaseline) {
+                Text(server.displayName)
+                    .font(.title2.weight(.semibold))
+                    .textSelection(.enabled)
+                Spacer()
+                if server.sources.contains(.manual) {
+                    Button("Retirer de la liste") { model.removeServer(server.address) }
+                        .controlSize(.small)
+                        .help("Retirer ce serveur ajouté à la main (touche Suppr dans la liste)")
+                }
+            }
             HStack(spacing: 6) {
                 if server.bonjourName != nil {
                     Text(server.address)
@@ -403,19 +536,17 @@ struct ServerDetailView: View {
                             .foregroundStyle(.secondary)
                     }
                     .padding(8)
-                case .failed(let message)?:
+                case .failed(let failure)?:
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(kind == .nfs
-                            ? "Impossible de lister les exports. Un serveur NFSv4 seul ne publie pas de liste : indique alors le chemin ci-dessous."
-                            : "Impossible de lister les partages (accès invité refusé ?).")
+                        Text(failure.headline)
                             .fixedSize(horizontal: false, vertical: true)
-                        Text(message)
+                        Text(failure.detail)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
                         HStack {
                             Button("Réessayer") { Task { await model.loadShares(for: server, kind: kind) } }
-                            if kind == .smb {
+                            if kind == .smb, failure.serverAnswers {
                                 Button("Se connecter avec le Finder…") { model.openInFinder(server: server, kind: kind) }
                             }
                         }
@@ -459,7 +590,8 @@ struct ServerDetailView: View {
     /// The path field appears once the listing has answered, one way or the other.
     private func showsManualExport(_ state: AppModel.ListingState?) -> Bool {
         switch state {
-        case .loaded?, .failed?: return true
+        case .loaded?: return true
+        case .failed(let failure)?: return failure.serverAnswers
         case .none, .loading?: return false
         }
     }
@@ -470,14 +602,23 @@ struct ManualExportRow: View {
     @EnvironmentObject private var model: AppModel
     let server: DiscoveredServer
     @State private var path = ""
+    @State private var isMounting = false
 
     var body: some View {
         HStack(spacing: 8) {
             TextField("Monter un autre export par son chemin, ex. /volume1/data", text: $path)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit(mount)
-            Button("Monter", action: mount)
-                .disabled(path.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled(isMounting)
+            if isMounting {
+                // A refused mount can take a quarter of a minute to say so.
+                ProgressView().controlSize(.small)
+                Text("Montage…")
+                    .foregroundStyle(.secondary)
+            } else {
+                Button("Monter", action: mount)
+                    .disabled(path.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
         }
         .padding(.vertical, 6)
         .padding(.horizontal, 4)
@@ -485,9 +626,12 @@ struct ManualExportRow: View {
 
     private func mount() {
         let wanted = path
-        guard !wanted.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        guard !isMounting, !wanted.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        isMounting = true
         Task {
-            await model.mountExport(path: wanted, on: server)
+            let mounted = await model.mountExport(path: wanted, on: server)
+            isMounting = false
+            if mounted { path = "" }
         }
     }
 }

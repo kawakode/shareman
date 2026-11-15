@@ -127,10 +127,28 @@ public enum NetworkScanner {
     /// Returns nil when `host` is not an IPv4 address or nothing answered, in
     /// which case the caller cannot tell and should try every protocol.
     public static func protocols(answeringOn host: String, timeout: TimeInterval = 1) async -> Set<ShareProtocol>? {
-        guard let address = IPv4Subnet.parseAddress(host) else { return nil }
-        let result = await PortScanner.scan(hosts: [address], ports: ShareProtocol.allCases.map(\.port), timeout: timeout)
-        let found = Set(ShareProtocol.allCases.filter { result.open[address]?.contains($0.port) == true })
-        return found.isEmpty ? nil : found
+        guard case .answering(let found) = await probe(host: host, timeout: timeout), !found.isEmpty else { return nil }
+        return found
+    }
+
+    /// What a quick look at one host's NFS and SMB ports says.
+    public enum HostAnswer: Equatable, Sendable {
+        /// Not an IPv4 address: it cannot be probed here.
+        case unknown
+        /// None of the NFS and SMB ports is open: wrong address, server off,
+        /// no file sharing there, or blocked on the way.
+        case silent
+        /// The host is there; these protocols have their port open (possibly none).
+        case answering(Set<ShareProtocol>)
+    }
+
+    /// Tells a host that is not there from one that refuses to list its shares.
+    public static func probe(host: String, timeout: TimeInterval = 1) async -> HostAnswer {
+        guard let address = IPv4Subnet.parseAddress(host) else { return .unknown }
+        let ports = ShareProtocol.allCases.map(\.port) + [RPCPortmapper.portmapperPort]
+        let result = await PortScanner.scan(hosts: [address], ports: ports, timeout: timeout)
+        guard let open = result.open[address], !open.isEmpty else { return .silent }
+        return .answering(Set(ShareProtocol.allCases.filter { open.contains($0.port) }))
     }
 
     static func bonjourScan(protocols: [ShareProtocol], duration: TimeInterval) async -> [DiscoveredServer] {
