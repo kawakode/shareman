@@ -9,6 +9,8 @@ struct ContentView: View {
     /// view state and copied to the model afterwards: bound straight to the
     /// model, every click logged "Publishing changes from within view updates".
     @State private var selection: String?
+    /// Same reason for the protocol picker of the toolbar.
+    @State private var filterChoice = AppModel.ProtocolFilter.both
 
     var body: some View {
         NavigationSplitView {
@@ -46,7 +48,13 @@ struct ContentView: View {
         .task {
             if !model.hasScanned { await model.scan() }
         }
-        .onAppear { model.refreshMounts() }
+        .onAppear {
+            filterChoice = model.filter
+            model.refreshMounts()
+        }
+        .onChange(of: filterChoice) { newValue in
+            if model.filter != newValue { model.filter = newValue }
+        }
         // Shares mounted, unmounted or starred in Finder show up here without a new scan.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             model.refreshMounts()
@@ -137,7 +145,7 @@ struct ContentView: View {
         // Separate items, in this order: when the window is narrow macOS hides
         // the last ones first, and the scan button must not be one of them.
         ToolbarItem(placement: .primaryAction) {
-            Picker("Protocoles", selection: $model.filter) {
+            Picker("Protocoles", selection: $filterChoice) {
                 ForEach(AppModel.ProtocolFilter.allCases) { filter in
                     Text(filter.label).tag(filter)
                 }
@@ -149,18 +157,17 @@ struct ContentView: View {
             Button {
                 Task { await model.scan() }
             } label: {
-                if model.isScanning {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
-                        Text("Scan en cours…")
+                // Same width in both states: a wider label pushed the options
+                // button out of the toolbar for the length of each scan.
+                Label("Scanner", systemImage: "arrow.clockwise")
+                    .labelStyle(.titleAndIcon)
+                    .opacity(model.isScanning ? 0 : 1)
+                    .overlay {
+                        if model.isScanning { ProgressView().controlSize(.small) }
                     }
-                } else {
-                    Label("Scanner", systemImage: "arrow.clockwise")
-                        .labelStyle(.titleAndIcon)
-                }
             }
             .disabled(model.isScanning)
-            .help("Chercher les serveurs (⌘R)")
+            .help(model.isScanning ? "Scan en cours…" : "Chercher les serveurs (⌘R)")
         }
         ToolbarItem(placement: .primaryAction) {
             ScanOptionsButton()
@@ -336,14 +343,22 @@ struct FavoriteButton: View {
     var body: some View {
         let isFavorite = model.isFavorite(path)
         let title = isFavorite ? "Retirer des favoris du Finder" : "Ajouter aux favoris du Finder"
-        Button {
-            Task { await model.toggleFavorite(path) }
-        } label: {
-            Label(title, systemImage: isFavorite ? "star.fill" : "star")
-                .labelStyle(.iconOnly)
-                .foregroundStyle(isFavorite ? Color.yellow : Color.secondary)
+        if model.favoriteBusy.contains(path) {
+            // The first time, macOS asks for access to network volumes and
+            // the star waits for the answer.
+            ProgressView()
+                .controlSize(.small)
+                .help("Modification des favoris du Finder…")
+        } else {
+            Button {
+                Task { await model.toggleFavorite(path) }
+            } label: {
+                Label(title, systemImage: isFavorite ? "star.fill" : "star")
+                    .labelStyle(.iconOnly)
+                    .foregroundStyle(isFavorite ? Color.yellow : Color.secondary)
+            }
+            .help(title)
         }
-        .help(title)
     }
 }
 
@@ -405,17 +420,37 @@ struct PlaceholderView: View {
                 Image(systemName: "network")
                     .font(.system(size: 44))
                     .foregroundStyle(.secondary)
-                Text(model.visibleServers.isEmpty ? "Aucun serveur" : "Choisis un serveur")
-                    .font(.title3)
-                Text("Lance un scan pour trouver les partages NFS et SMB du réseau.\nSi un serveur NFS n'apparaît pas, active le scan approfondi dans les options de scan ou ajoute-le à la main.")
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
-                Button("Scanner") { Task { await model.scan() } }
-                    .keyboardShortcut(.defaultAction)
+                if !model.visibleServers.isEmpty {
+                    Text("Choisis un serveur")
+                        .font(.title3)
+                    Text("Ses partages s'affichent ici.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(model.hasScanned ? "Aucun serveur trouvé" : "Aucun serveur")
+                        .font(.title3)
+                    Text(emptyAdvice)
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.secondary)
+                    Button(model.hasScanned ? "Scanner à nouveau" : "Scanner") { Task { await model.scan() } }
+                        .keyboardShortcut(.defaultAction)
+                }
             }
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// What to try next, once a scan has come back empty.
+    private var emptyAdvice: String {
+        guard model.hasScanned else {
+            return "Lance un scan pour trouver les partages NFS et SMB du réseau."
+        }
+        let byHand = "ajoute-le à la main par son adresse, en bas à gauche."
+        if model.filter == .smb {
+            return "Le scan n'a vu aucun serveur SMB.\nSi le tien n'apparaît pas, " + byHand
+        }
+        return "Le scan n'a vu aucun serveur \(model.filter.label).\nSi un serveur NFS n'apparaît pas, "
+            + "active le scan approfondi dans les options de scan ou " + byHand
     }
 }
 

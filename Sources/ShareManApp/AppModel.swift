@@ -97,6 +97,8 @@ final class AppModel: ObservableObject {
     @Published var localNetworkBlocked = false
     /// URLs of shares being mounted, mount points of shares being unmounted.
     @Published var busy: Set<String> = []
+    /// Mount points whose Finder favorite is being added or removed.
+    @Published var favoriteBusy: Set<String> = []
     @Published var alert: AlertItem?
 
     init(defaults: UserDefaults = .standard) {
@@ -159,7 +161,8 @@ final class AppModel: ObservableObject {
         hasScanned = true
         scannedProtocols = options.protocols
 
-        let found = servers.filter { !$0.protocols.isDisjoint(with: options.protocols) }
+        // Servers added by hand are not counted: the scan did not find them.
+        let found = result.servers
         if !found.isEmpty {
             status = Self.summary(of: found, scanned: options.protocols)
         } else if result.blockedByLocalNetwork {
@@ -349,6 +352,9 @@ final class AppModel: ObservableObject {
 
     /// Adds the mount point to the Finder sidebar Favorites, or removes it if it is already there.
     func toggleFavorite(_ path: String) async {
+        guard !favoriteBusy.contains(path) else { return }
+        favoriteBusy.insert(path)
+        defer { favoriteBusy.remove(path) }
         let removing = isFavorite(path)
         let result = await Task.detached(priority: .userInitiated) { () -> Result<Bool, Error> in
             do {
