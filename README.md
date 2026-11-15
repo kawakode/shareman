@@ -35,7 +35,7 @@ Il faut macOS 13 Ventura ou plus récent.
 
 À gauche, les serveurs trouvés. À droite, les partages du serveur choisi, avec un bouton **Monter** (ou **Ouvrir** et **Démonter** s'il est déjà monté).
 
-La barre d'outils permet de choisir NFS, SMB ou les deux, d'activer le scan approfondi et d'indiquer un sous-réseau précis (ex. `10.0.0.0/24`). Un serveur introuvable peut être ajouté à la main par son adresse IP.
+La barre d'outils permet de choisir NFS, SMB ou les deux et de lancer un scan. Le bouton d'options, à côté, active le scan approfondi et indique un sous-réseau précis (ex. `10.0.0.0/24`). Un serveur introuvable peut être ajouté à la main par son adresse IP.
 
 ## Ligne de commande
 

@@ -334,6 +334,20 @@ final class ScanOptionsTests: XCTestCase {
         result.open = [1: [2049]]
         XCTAssertFalse(result.looksBlockedLocally)
     }
+
+    func testProbeCannotJudgeAHostName() async {
+        // Only IPv4 addresses are probed: a name gives no verdict, not "silent".
+        let answer = await NetworkScanner.probe(host: "nas.example.invalid")
+        XCTAssertEqual(answer, .unknown)
+        let protocols = await NetworkScanner.protocols(answeringOn: "nas.example.invalid")
+        XCTAssertNil(protocols)
+    }
+
+    func testProbeOfALocalAddressWithoutFileSharing() async {
+        // 127.0.0.2 is this machine and nobody listens there on the NFS and SMB ports.
+        let answer = await NetworkScanner.probe(host: "127.0.0.2", timeout: 0.5)
+        XCTAssertEqual(answer, .silent)
+    }
 }
 
 final class FinderFavoritesPathTests: XCTestCase {

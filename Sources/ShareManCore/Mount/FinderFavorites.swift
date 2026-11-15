@@ -7,6 +7,9 @@ public enum FinderFavoritesError: LocalizedError, Equatable {
     case notADirectory(String)
     /// macOS did not accept the change (the API is deprecated and may be ignored).
     case refused(String)
+    /// macOS's privacy settings keep this application out of the folder
+    /// (typically "Network Volumes" in Files and Folders).
+    case accessDenied(String)
     case unsupportedPlatform
 
     public var errorDescription: String? {
@@ -15,6 +18,9 @@ public enum FinderFavoritesError: LocalizedError, Equatable {
             return "« \(path) » n'est pas un dossier accessible."
         case let .refused(path):
             return "macOS n'a pas accepté de modifier les favoris du Finder pour « \(path) »."
+        case let .accessDenied(path):
+            return "macOS ne laisse pas cette application accéder à « \(path) », ce qu'il exige pour l'ajouter aux favoris du Finder. "
+                + "Autorise-la dans Réglages Système > Confidentialité et sécurité > Fichiers et dossiers (Volumes réseau), puis réessaie."
         case .unsupportedPlatform:
             return "Les favoris du Finder n'existent que sur macOS."
         }
@@ -77,6 +83,7 @@ public enum FinderFavorites {
         if let before, before.contains(where: { resolvedPath($0) == target }) {
             return .alreadyPresent
         }
+        guard requestAccess(to: target) else { throw FinderFavoritesError.accessDenied(path) }
 
         let url = URL(fileURLWithPath: target, isDirectory: true) as CFURL
         guard insertAtEnd(list: list, url: url) else { throw FinderFavoritesError.refused(path) }
@@ -124,6 +131,23 @@ public enum FinderFavorites {
     }
 
     #if os(macOS)
+    /// macOS only lets an application put a folder in the favorites if that
+    /// application may read it. For a network volume this is a privacy consent
+    /// ("Network Volumes"), and the favorites service checks it without ever
+    /// asking: the insert just fails. Opening the folder is what makes macOS
+    /// ask the user, and this call waits for the answer, so keep it off the
+    /// main thread. Returns false when the privacy settings said no.
+    private static func requestAccess(to path: String) -> Bool {
+        let descriptor = open(path, O_RDONLY | O_DIRECTORY)
+        if descriptor >= 0 {
+            close(descriptor)
+            return true
+        }
+        // EPERM is the privacy refusal. Anything else (e.g. EACCES from the
+        // server's own permissions) does not stop the favorites service.
+        return errno != EPERM
+    }
+
     private typealias InsertItemURLFunction = @convention(c) (
         UnsafeRawPointer,   // LSSharedFileListRef inList
         UnsafeRawPointer?,  // LSSharedFileListItemRef insertAfterThisItem

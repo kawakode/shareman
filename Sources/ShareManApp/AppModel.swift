@@ -27,16 +27,28 @@ final class AppModel: ObservableObject {
     enum ListingState {
         case loading
         case loaded([NetworkShare])
-        case failed(String)
+        case failed(ListingFailure)
+    }
+
+    /// Why the shares of a server could not be listed, in the user's words.
+    struct ListingFailure {
+        /// What happened and what to do about it.
+        let headline: String
+        /// The tool's own error, for those who want it.
+        let detail: String
+        /// False when the server is not there at all: offering to mount a path would be noise.
+        var serverAnswers = true
     }
 
     struct AlertItem: Identifiable {
         let id = UUID()
         let title: String
         let message: String
-        /// Optional second, destructive button (e.g. "Forcer le démontage").
+        /// Optional second button (e.g. "Forcer le démontage").
         var actionTitle: String? = nil
         var action: (() -> Void)? = nil
+        /// Whether that button loses or changes something (shown in red).
+        var actionIsDestructive = false
     }
 
     private enum Keys {
@@ -59,7 +71,13 @@ final class AppModel: ObservableObject {
 
     // The scan settings and the servers added by hand are kept between launches.
     @Published var filter: ProtocolFilter {
-        didSet { defaults.set(filter.rawValue, forKey: Keys.filter) }
+        didSet {
+            defaults.set(filter.rawValue, forKey: Keys.filter)
+            // Showing "no SMB server" when SMB was never looked for would be a lie.
+            if hasScanned, !filter.protocols.isSubset(of: scannedProtocols) {
+                Task { await scan() }
+            }
+        }
     }
     @Published var deepScan: Bool {
         didSet { defaults.set(deepScan, forKey: Keys.deepScan) }
@@ -71,6 +89,8 @@ final class AppModel: ObservableObject {
 
     @Published var isScanning = false
     @Published var hasScanned = false
+    /// Protocols the last scan looked for.
+    private var scannedProtocols: Set<ShareProtocol> = []
     @Published var status = "Clique sur « Scanner » pour chercher les partages du réseau."
     @Published var warnings: [String] = []
     /// The last scan was stopped by macOS's "Local Network" privacy setting.
@@ -137,21 +157,35 @@ final class AppModel: ObservableObject {
         listingGeneration += 1
         isScanning = false
         hasScanned = true
+        scannedProtocols = options.protocols
 
-        let nfsCount = servers.filter { $0.protocols.contains(.nfs) }.count
-        let smbCount = servers.filter { $0.protocols.contains(.smb) }.count
-        if !servers.isEmpty {
-            let total = servers.count == 1 ? "1 serveur" : "\(servers.count) serveurs"
-            status = "\(total) : \(nfsCount) NFS, \(smbCount) SMB."
+        let found = servers.filter { !$0.protocols.isDisjoint(with: options.protocols) }
+        if !found.isEmpty {
+            status = Self.summary(of: found, scanned: options.protocols)
         } else if result.blockedByLocalNetwork {
             status = "Scan bloqué par macOS."
-        } else if options.deepNFS || filter == .smb {
+        } else if options.deepNFS || !options.protocols.contains(.nfs) {
             status = "Aucun serveur trouvé."
         } else {
             status = "Aucun serveur trouvé. Essaie le scan approfondi."
         }
         if selectedServer == nil { selectedServerID = visibleServers.first?.address }
         refreshMounts()
+
+        // The protocols were changed while this scan ran: look for the new ones too.
+        if !filter.protocols.isSubset(of: scannedProtocols) { await scan() }
+    }
+
+    /// "2 serveurs NFS." after an NFS scan; both counts only when both were looked for.
+    static func summary(of servers: [DiscoveredServer], scanned: Set<ShareProtocol>) -> String {
+        let total = servers.count == 1 ? "1 serveur" : "\(servers.count) serveurs"
+        if scanned.count == 1, let only = scanned.first {
+            return "\(total) \(only.displayName)."
+        }
+        let counts = ShareProtocol.allCases
+            .filter { scanned.contains($0) }
+            .map { kind in "\(servers.filter { $0.protocols.contains(kind) }.count) \(kind.displayName)" }
+        return "\(total) : \(counts.joined(separator: ", "))."
     }
 
     /// Adds a server by hand (name or IP), for hosts the scan cannot see.
@@ -247,7 +281,44 @@ final class AppModel: ObservableObject {
             let shares = try await ShareLister.shares(of: server.address, kind: kind)
             listings[server.address, default: [:]][kind] = .loaded(shares)
         } catch {
-            listings[server.address, default: [:]][kind] = .failed(error.localizedDescription)
+            let failure = await Self.explain(error, listing: kind, on: server.address)
+            listings[server.address, default: [:]][kind] = .failed(failure)
+        }
+    }
+
+    /// `showmount` and `smbutil` fail the same way for a wrong address, a server
+    /// without that service and a server that keeps its list to itself. A look
+    /// at the ports tells which one it is.
+    private static func explain(_ error: Error, listing kind: ShareProtocol, on address: String) async -> ListingFailure {
+        let detail = error.localizedDescription
+        switch await NetworkScanner.probe(host: address) {
+        case .silent:
+            return ListingFailure(
+                headline: "Aucun service NFS ou SMB ne répond à l'adresse \(address). "
+                    + "Vérifie l'adresse et que le serveur est allumé.",
+                detail: detail,
+                serverAnswers: false
+            )
+        case .answering(let open) where !open.contains(kind):
+            if kind == .smb {
+                return ListingFailure(
+                    headline: "Ce serveur ne répond pas en SMB (port 445 fermé).",
+                    detail: detail,
+                    serverAnswers: false
+                )
+            }
+            return ListingFailure(
+                headline: "Ce serveur ne répond pas sur le port NFS habituel (2049) et ne donne pas sa liste d'exports. "
+                    + "Si tu connais le chemin d'un export, indique-le ci-dessous.",
+                detail: detail
+            )
+        case .answering, .unknown:
+            return ListingFailure(
+                headline: kind == .nfs
+                    ? "Ce serveur ne donne pas sa liste d'exports. Un serveur NFSv4 seul n'en publie pas : indique alors le chemin ci-dessous."
+                    : "Ce serveur ne donne pas sa liste de partages sans identifiants (accès invité refusé).",
+                detail: detail
+            )
         }
     }
 
@@ -294,7 +365,16 @@ final class AppModel: ObservableObject {
         await refreshFavorites()
 
         guard case .failure(let error) = result else { return }
-        if removing {
+        if case FinderFavoritesError.accessDenied = error {
+            // No Finder fallback here: the way out is in System Settings.
+            alert = AlertItem(
+                title: "Accès aux volumes réseau refusé",
+                message: "macOS ne laisse pas ShareMan accéder à « \(path) », ce qu'il exige pour l'ajouter aux favoris du Finder.\n\n"
+                    + "Autorise ShareMan dans Réglages Système > Confidentialité et sécurité > Fichiers et dossiers (Volumes réseau), puis clique à nouveau sur l'étoile.",
+                actionTitle: "Ouvrir les réglages…",
+                action: { [weak self] in self?.openFilesAndFoldersSettings() }
+            )
+        } else if removing {
             alert = AlertItem(
                 title: "Retrait des favoris impossible",
                 message: error.localizedDescription
@@ -341,8 +421,10 @@ final class AppModel: ObservableObject {
         return normalized(lhs) == normalized(rhs)
     }
 
-    func mount(_ share: NetworkShare) async {
-        guard let url = share.url else { return }
+    /// Returns true once the share is mounted (now, or already before the call).
+    @discardableResult
+    func mount(_ share: NetworkShare) async -> Bool {
+        guard let url = share.url else { return false }
         let key = url.absoluteString
         busy.insert(key)
         defer { busy.remove(key) }
@@ -356,9 +438,11 @@ final class AppModel: ObservableObject {
             if let first = points.first ?? mountedShare(for: share)?.mountPoint {
                 reveal(first)
             }
+            return true
         } catch ShareManError.mountFailed(let code, _) where code == ShareMounter.userCancelledStatus {
             // The user closed macOS's password dialog: nothing to report.
             refreshMounts()
+            return false
         } catch ShareManError.mountFailed(let code, let message) where code == ShareMounter.alreadyMountedStatus {
             // Mounted outside ShareMan (Finder, another name for the same server): show it.
             refreshMounts()
@@ -370,18 +454,21 @@ final class AppModel: ObservableObject {
                     message: message + " Il figure dans « Partages montés », dans la barre latérale."
                 )
             }
+            return true
         } catch {
             refreshMounts()
             alert = AlertItem(title: "Montage impossible", message: error.localizedDescription)
+            return false
         }
     }
 
     /// Mounts an export the server did not list (NFSv4-only servers publish no list).
-    func mountExport(path rawPath: String, on server: DiscoveredServer) async {
+    @discardableResult
+    func mountExport(path rawPath: String, on server: DiscoveredServer) async -> Bool {
         var path = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !path.isEmpty else { return }
+        guard !path.isEmpty else { return false }
         if !path.hasPrefix("/") { path = "/" + path }
-        await mount(NetworkShare(server: server.address, kind: .nfs, path: path))
+        return await mount(NetworkShare(server: server.address, kind: .nfs, path: path))
     }
 
     func unmount(_ mountedShare: MountedShare, force: Bool = false) async {
@@ -401,7 +488,8 @@ final class AppModel: ObservableObject {
                     actionTitle: "Forcer le démontage",
                     action: { [weak self] in
                         Task { await self?.unmount(mountedShare, force: true) }
-                    }
+                    },
+                    actionIsDestructive: true
                 )
             }
         }
@@ -409,12 +497,26 @@ final class AppModel: ObservableObject {
     }
 
     func reveal(_ path: String) {
-        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        // The first time, macOS asks whether ShareMan may access network volumes
+        // and the plain `open(_:)` waits for the answer: called here, it froze
+        // the window for as long as the question stayed on screen.
+        NSWorkspace.shared.open(
+            URL(fileURLWithPath: path, isDirectory: true),
+            configuration: NSWorkspace.OpenConfiguration(),
+            completionHandler: nil
+        )
     }
 
     /// Hands an SMB server to Finder, which asks for credentials and lists the shares.
     func openInFinder(server: DiscoveredServer, kind: ShareProtocol) {
         if let url = URL(string: "\(kind.rawValue)://\(server.address)") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Opens System Settings on the Files and Folders privacy list (Network Volumes).
+    func openFilesAndFoldersSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders") {
             NSWorkspace.shared.open(url)
         }
     }
